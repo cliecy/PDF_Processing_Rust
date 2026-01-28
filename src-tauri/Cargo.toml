@@ -24,7 +24,7 @@ rayon = "1.10"
 thiserror = "1.0"
 tempfile = "3.10"
 pdf = "0.9"
-pdfium-render = { version = "0.8", features = ["bindings"] }
+
 
 [features]
 default = ["custom-protocol"]

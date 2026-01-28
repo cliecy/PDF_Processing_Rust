@@ -26,13 +26,17 @@
     ],
     "security": {
       "csp": null,
-      "capabilities": ["pdf-toolkit-capabilities"]
+      "capabilities": [
+        "pdf-toolkit-capabilities"
+      ]
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": [],
+    "icon": [
+      "icons/icon.ico"
+    ],
     "resources": [],
     "externalBin": [],
     "copyright": "",

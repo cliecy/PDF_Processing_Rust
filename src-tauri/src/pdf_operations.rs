@@ -321,17 +321,22 @@ pub async fn pdf_to_images(
     output_dir: String,
     format: String,
 ) -> Result<ProcessResult, PdfError> {
-    use pdfium_render::prelude::*;
-    use image::ImageFormat;
+    use std::process::Command;
     
     // Create output directory if it doesn't exist
     fs::create_dir_all(&output_dir)?;
     
-    // Determine output format
-    let (ext, img_format) = if format.to_lowercase() == "jpg" || format.to_lowercase() == "jpeg" {
-        ("jpg", ImageFormat::Jpeg)
+    // Determine output format flag
+    let format_flag = if format.to_lowercase() == "jpg" || format.to_lowercase() == "jpeg" {
+        "-jpeg"
     } else {
-        ("png", ImageFormat::Png)
+        "-png"
+    };
+
+    let ext = if format.to_lowercase() == "jpg" || format.to_lowercase() == "jpeg" {
+        "jpg"
+    } else {
+        "png"
     };
     
     // Get base name for output files
@@ -340,59 +345,29 @@ pub async fn pdf_to_images(
         .and_then(|s| s.to_str())
         .unwrap_or("page");
     
-    // Initialize Pdfium with bindings feature
-    // The bindings feature automatically downloads PDFium during build.
-    // Note: Pdfium::default() will abort if library cannot be loaded.
-    // The bindings feature should handle library discovery automatically.
-    // For Tauri apps, we need to ensure the library is bundled correctly.
-    let pdfium = pdfium_render::prelude::Pdfium::default();
+    let output_prefix = Path::new(&output_dir).join(base_name);
     
-    // Load PDF document
-    let document = pdfium.load_pdf_from_file(&file_path, None)
-        .map_err(|e| PdfError::InvalidOperation(format!(
-            "PDF 转图片失败: {}",
-            e
-        )))?;
-    
-    // Get page count
-    let page_count = document.pages().len();
-    
-    if page_count == 0 {
-        return Err(PdfError::InvalidOperation("PDF 文件没有页面".to_string()));
-    }
-    
-    // Configure rendering (200 DPI for good quality)
-    let render_config = PdfRenderConfig::new()
-        .set_target_width(2000)
-        .set_maximum_height(2000);
-    
-    // Render each page and save as image
-    let mut success_count = 0;
-    for (index, page) in document.pages().iter().enumerate() {
-        let output_file = Path::new(&output_dir).join(format!("{}-{:03}.{}", base_name, index + 1, ext));
-        
-        match page.render_with_config(&render_config) {
-            Ok(bitmap) => {
-                let img = bitmap.as_image();
-                let rgb_img = img.into_rgb8();
-                rgb_img.save_with_format(&output_file, img_format)
-                    .map_err(|e| PdfError::Image(e))?;
-                success_count += 1;
-            }
-            Err(e) => {
-                return Err(PdfError::InvalidOperation(format!(
-                    "PDF 转图片失败: 第 {} 页渲染失败 - {}",
-                    index + 1, e
-                )));
-            }
-        }
+    // Construct command: pdftoppm -<format> -r 200 input.pdf output_prefix
+    // Note: pdftoppm automatically adds -1, -2, etc. and extension
+    let status = Command::new("pdftoppm")
+        .arg(format_flag)
+        .arg("-r")
+        .arg("200")
+        .arg(&file_path)
+        .arg(&output_prefix)
+        .status()
+        .map_err(|e| PdfError::InvalidOperation(format!("Failed to execute pdftoppm: {}. Please ensure Poppler is installed and on PATH.", e)))?;
+
+    if !status.success() {
+        return Err(PdfError::InvalidOperation("pdftoppm failed to convert PDF to images".to_string()));
     }
     
     Ok(ProcessResult {
         success: true,
         message: format!(
-            "成功转换 {} 页为 {} 格式图片",
-            success_count, ext.to_uppercase()
+            "Successfully converted to {} format images in {}",
+            ext.to_uppercase(),
+            output_dir
         ),
         output_path: Some(output_dir),
     })
