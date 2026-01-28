@@ -1,0 +1,38 @@
+[package]
+name = "pdf-toolkit"
+version = "1.0.0"
+description = "A powerful PDF processing toolkit"
+authors = ["PDF Toolkit"]
+edition = "2021"
+
+[lib]
+name = "pdf_toolkit_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+lopdf = "0.32"
+image = "0.25"
+rayon = "1.10"
+thiserror = "1.0"
+tempfile = "3.10"
+pdf = "0.9"
+pdfium-render = { version = "0.8", features = ["bindings"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

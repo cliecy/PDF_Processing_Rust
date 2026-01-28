@@ -1,0 +1,1 @@
+{"pdf-toolkit-capabilities":{"identifier":"pdf-toolkit-capabilities","description":"Capabilities for PDF Toolkit","local":true,"windows":["main"],"permissions":["core:default","dialog:default","dialog:allow-open","dialog:allow-save","fs:default","fs:read-all","fs:write-all","fs:scope"]}}
