@@ -43,11 +43,34 @@ npm run tauri dev
 
 ## 构建
 
+### 打包成 DMG（分发给别人）
+
+在 **macOS** 上执行：
+
+```bash
+# 1. 安装依赖（首次或更新后）
+npm install
+
+# 2. 打包（会生成 .app 和 .dmg）
+npm run tauri build
+```
+
+打包完成后，DMG 文件位置：
+
+- **Apple Silicon (M1/M2/M3)**：`src-tauri/target/release/bundle/dmg/PDF Toolkit_1.0.0_aarch64.dmg`
+- **Intel Mac**：先执行 `npm run tauri build -- --target x86_64-apple-darwin`，产物在 `src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/`
+
+把生成的 **.dmg** 发给对方即可。对方双击 DMG → 把「PDF Toolkit」拖到「应用程序」→ 完成安装。
+
+### 仅构建当前架构
+
 ```bash
 npm run tauri build
 ```
 
-构建产物位于 `src-tauri/target/release/bundle/` 目录下。
+构建产物目录：`src-tauri/target/release/bundle/`
+- `macos/`：PDF Toolkit.app
+- `dmg/`：PDF Toolkit_1.0.0_aarch64.dmg（或 x86_64）
 
 ## 技术栈
 

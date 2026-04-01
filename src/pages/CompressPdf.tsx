@@ -59,11 +59,11 @@ export default function CompressPdf() {
   };
 
   const qualityLabels: Record<number, string> = {
-    25: '最小体积',
-    50: '低质量',
-    75: '推荐',
-    90: '高质量',
-    100: '无损',
+    25: '轻度优化',
+    50: '标准优化',
+    75: '深度优化',
+    90: '强力优化',
+    100: '最大优化',
   };
 
   if (result) {
@@ -127,9 +127,9 @@ export default function CompressPdf() {
             </div>
           </div>
 
-          {/* Quality Selection */}
+          {/* Optimization Level */}
           <div className="bg-[#1a1a21] rounded-2xl border border-[#2e2e38] p-6 mb-6">
-            <h3 className="text-white font-medium mb-4">压缩质量</h3>
+            <h3 className="text-white font-medium mb-4">优化级别</h3>
             <div className="space-y-4">
               <input
                 type="range"
@@ -141,11 +141,11 @@ export default function CompressPdf() {
                 className="w-full h-2 bg-[#22222b] rounded-lg appearance-none cursor-pointer accent-green-500"
               />
               <div className="flex justify-between text-xs text-zinc-500">
-                <span>最小体积</span>
-                <span>低质量</span>
-                <span>推荐</span>
-                <span>高质量</span>
-                <span>无损</span>
+                <span>轻度</span>
+                <span>标准</span>
+                <span>深度</span>
+                <span>强力</span>
+                <span>最大</span>
               </div>
               <div className="text-center">
                 <span className="inline-block px-4 py-2 bg-green-500/10 rounded-lg text-green-400 font-medium">
@@ -161,7 +161,7 @@ export default function CompressPdf() {
               当前文件大小：<strong>{formatFileSize(pdfInfo?.file_size || 0)}</strong>
             </p>
             <p className="text-xs text-zinc-500 mt-1">
-              压缩效果取决于 PDF 内容。包含大量图片的文件压缩效果更明显。
+              当前实现是无损结构优化，不会主动降低图片分辨率。更高级别会做更积极的对象清理与重排。
             </p>
           </div>
 
