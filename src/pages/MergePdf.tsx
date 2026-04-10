@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Merge, Plus, GripVertical, Trash2 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import Button from '../components/Button';
@@ -16,6 +16,8 @@ export default function MergePdf() {
   const [result, setResult] = useState<ProcessResult | null>(null);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [dragEnabledIndex, setDragEnabledIndex] = useState<number | null>(null);
+  const dragEnabledRef = useRef<number | null>(null);
   const { selectPdfFiles, mergePdfs, selectOutputFile, openFolder, copyToClipboard } = useTauri();
 
   const handleAddFiles = async () => {
@@ -73,18 +75,38 @@ export default function MergePdf() {
     setFiles(newFiles);
   };
 
-  const handleDragStart = (index: number) => {
+  const handleDragHandlePointerDown = (index: number) => {
+    dragEnabledRef.current = index;
+    setDragEnabledIndex(index);
+  };
+
+  const handleDragStart = (e: React.DragEvent<HTMLDivElement>, index: number) => {
+    if (dragEnabledRef.current !== index) {
+      e.preventDefault();
+      return;
+    }
+
     setDraggedIndex(index);
+    setDragOverIndex(index);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.dropEffect = 'move';
+    e.dataTransfer.setData('text/plain', String(index));
   };
 
   const handleDragOver = (e: React.DragEvent, index: number) => {
     e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
     if (draggedIndex === null || draggedIndex === index) return;
     setDragOverIndex(index);
   };
 
-  const handleDragLeave = () => {
-    setDragOverIndex(null);
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    const nextTarget = e.relatedTarget;
+    if (nextTarget instanceof Node && e.currentTarget.contains(nextTarget)) {
+      return;
+    }
+
+    setDragOverIndex((current) => (current === draggedIndex ? current : null));
   };
 
   const handleDrop = (e: React.DragEvent, dropIndex: number) => {
@@ -106,6 +128,8 @@ export default function MergePdf() {
   const handleDragEnd = () => {
     setDraggedIndex(null);
     setDragOverIndex(null);
+    setDragEnabledIndex(null);
+    dragEnabledRef.current = null;
   };
 
   const handleClearAll = () => {
@@ -172,7 +196,7 @@ export default function MergePdf() {
               <div
                 key={`${file.path}-${index}`}
                 draggable
-                onDragStart={() => handleDragStart(index)}
+                onDragStart={(e) => handleDragStart(e, index)}
                 onDragOver={(e) => handleDragOver(e, index)}
                 onDragLeave={handleDragLeave}
                 onDrop={(e) => handleDrop(e, index)}
@@ -185,9 +209,28 @@ export default function MergePdf() {
                     : 'hover:bg-[#22222b]'
                 }`}
               >
-                <div className="text-zinc-600 hover:text-orange-400 cursor-grab active:cursor-grabbing transition-colors">
+                <button
+                  type="button"
+                  onPointerDown={() => handleDragHandlePointerDown(index)}
+                  onPointerUp={() => {
+                    if (draggedIndex === null) {
+                      setDragEnabledIndex(null);
+                      dragEnabledRef.current = null;
+                    }
+                  }}
+                  onPointerCancel={() => {
+                    setDragEnabledIndex(null);
+                    dragEnabledRef.current = null;
+                  }}
+                  className={`text-zinc-600 transition-colors ${
+                    dragEnabledIndex === index
+                      ? 'text-orange-400 cursor-grabbing'
+                      : 'hover:text-orange-400 cursor-grab active:cursor-grabbing'
+                  }`}
+                  title="拖动调整顺序"
+                >
                   <GripVertical size={18} />
-                </div>
+                </button>
                 <span className="w-8 h-8 rounded-lg bg-orange-500/10 text-orange-400 flex items-center justify-center text-sm font-medium">
                   {index + 1}
                 </span>

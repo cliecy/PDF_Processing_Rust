@@ -55,13 +55,116 @@ where
         .map_err(|error| PdfError::InvalidOperation(format!("Background task failed: {}", error)))?
 }
 
+fn pdf_path_error(action: &str, path: &Path, error: impl ToString) -> PdfError {
+    let detail = error.to_string();
+    let mut message = format!("{}失败：{}\n{}", action, path.display(), detail);
+    let detail_lower = detail.to_ascii_lowercase();
+
+    if detail_lower.contains("timed out") || detail_lower.contains("os error 60") {
+        message.push_str(
+            "\n该路径读写超时。常见原因是文件位于 iCloud、网盘、外置磁盘，或目录尚未完成同步。请先改到本地磁盘目录后再试。",
+        );
+    }
+
+    PdfError::InvalidOperation(message)
+}
+
+fn load_pdf_document(path: impl AsRef<Path>) -> Result<Document, PdfError> {
+    let path = path.as_ref();
+    Document::load(path).map_err(|error| pdf_path_error("读取 PDF", path, error))
+}
+
+fn ensure_output_directory(output_path: &Path) -> Result<PathBuf, PdfError> {
+    let parent = output_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+
+    if !parent.exists() {
+        return Err(PdfError::InvalidOperation(format!(
+            "输出目录不存在：{}",
+            parent.display()
+        )));
+    }
+
+    if !parent.is_dir() {
+        return Err(PdfError::InvalidOperation(format!(
+            "输出路径的上级不是目录：{}",
+            parent.display()
+        )));
+    }
+
+    Ok(parent)
+}
+
+fn same_filesystem_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn ensure_output_is_not_an_input(
+    input_paths: &[String],
+    output_path: impl AsRef<Path>,
+) -> Result<(), PdfError> {
+    let output_path = output_path.as_ref();
+
+    if input_paths
+        .iter()
+        .map(Path::new)
+        .any(|input_path| same_filesystem_path(input_path, output_path))
+    {
+        return Err(PdfError::InvalidOperation(
+            "输出文件不能覆盖输入文件，请选择新的保存路径。".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn save_pdf_document(
+    document: &mut Document,
+    output_path: impl AsRef<Path>,
+) -> Result<(), PdfError> {
+    let output_path = output_path.as_ref();
+    let output_dir = ensure_output_directory(output_path)?;
+    let temp_path = tempfile::Builder::new()
+        .prefix(".pdf-toolkit-")
+        .suffix(".pdf")
+        .tempfile_in(&output_dir)
+        .map_err(|error| pdf_path_error("创建临时输出文件", &output_dir, error))?
+        .into_temp_path();
+
+    document
+        .save(&temp_path)
+        .map_err(|error| pdf_path_error("写入输出 PDF", temp_path.as_ref(), error))?;
+
+    if output_path.exists() {
+        fs::remove_file(output_path)
+            .map_err(|error| pdf_path_error("覆盖现有输出文件", output_path, error))?;
+    }
+
+    temp_path
+        .persist(output_path)
+        .map_err(|error| pdf_path_error("保存输出 PDF", output_path, error.error))?;
+
+    Ok(())
+}
+
 /// Get PDF information
 #[tauri::command]
 pub async fn get_pdf_info(file_path: String) -> Result<PdfInfo, PdfError> {
     run_blocking(move || {
         let path = Path::new(&file_path);
-        let metadata = fs::metadata(path)?;
-        let doc = Document::load(path)?;
+        let metadata =
+            fs::metadata(path).map_err(|error| pdf_path_error("读取文件信息", path, error))?;
+        let doc = load_pdf_document(path)?;
 
         let page_count = doc.get_pages().len();
         let pdf_version = doc.version.clone();
@@ -150,7 +253,7 @@ fn merge_pdf_documents(file_paths: &[String]) -> Result<Document, PdfError> {
     let mut documents_objects = BTreeMap::new();
 
     for path in file_paths {
-        let mut doc = Document::load(path)?;
+        let mut doc = load_pdf_document(path)?;
         doc.renumber_objects_with(max_id);
         max_id = doc.max_id + 1;
 
@@ -559,12 +662,13 @@ pub async fn merge_pdfs(
     output_path: String,
 ) -> Result<ProcessResult, PdfError> {
     run_blocking(move || {
+        ensure_output_is_not_an_input(&file_paths, &output_path)?;
         let mut merged_doc = merge_pdf_documents(&file_paths)?;
-        merged_doc.save(&output_path)?;
+        save_pdf_document(&mut merged_doc, &output_path)?;
 
         Ok(ProcessResult {
             success: true,
-            message: format!("Successfully merged {} PDFs", file_paths.len()),
+            message: format!("成功合并 {} 个 PDF 文件", file_paths.len()),
             output_path: Some(output_path),
         })
     })
@@ -579,7 +683,7 @@ pub async fn split_pdf(
     output_dir: String,
 ) -> Result<ProcessResult, PdfError> {
     run_blocking(move || {
-        let doc = Document::load(&file_path)?;
+        let doc = load_pdf_document(&file_path)?;
         let total_pages = doc.get_pages().len();
         let base_name = Path::new(&file_path)
             .file_stem()
@@ -623,7 +727,7 @@ pub async fn split_pdf(
             }
 
             let output_path = format!("{}/{}_{}.pdf", output_dir, base_name, idx + 1);
-            new_doc.save(&output_path)?;
+            save_pdf_document(&mut new_doc, &output_path)?;
             output_files.push(output_path);
         }
 
@@ -644,7 +748,7 @@ pub async fn delete_pages(
     output_path: String,
 ) -> Result<ProcessResult, PdfError> {
     run_blocking(move || {
-        let doc = Document::load(&file_path)?;
+        let doc = load_pdf_document(&file_path)?;
         let mut all_pages: Vec<u32> = doc.get_pages().keys().cloned().collect();
         all_pages.sort();
 
@@ -657,7 +761,7 @@ pub async fn delete_pages(
 
         let mut new_doc = doc.clone();
         new_doc.delete_pages(&actual_pages_to_delete);
-        new_doc.save(&output_path)?;
+        save_pdf_document(&mut new_doc, &output_path)?;
 
         Ok(ProcessResult {
             success: true,
@@ -676,7 +780,7 @@ pub async fn extract_pages(
     output_path: String,
 ) -> Result<ProcessResult, PdfError> {
     run_blocking(move || {
-        let doc = Document::load(&file_path)?;
+        let doc = load_pdf_document(&file_path)?;
         let mut all_pages: Vec<u32> = doc.get_pages().keys().cloned().collect();
         all_pages.sort();
 
@@ -695,7 +799,7 @@ pub async fn extract_pages(
 
         let mut new_doc = doc.clone();
         new_doc.delete_pages(&pages_to_delete);
-        new_doc.save(&output_path)?;
+        save_pdf_document(&mut new_doc, &output_path)?;
 
         Ok(ProcessResult {
             success: true,
@@ -714,13 +818,17 @@ pub async fn compress_pdf(
     quality: u8,
 ) -> Result<ProcessResult, PdfError> {
     run_blocking(move || {
-        let mut doc = Document::load(&file_path)?;
+        let mut doc = load_pdf_document(&file_path)?;
         apply_compression_profile(&mut doc, quality);
 
-        doc.save(&output_path)?;
+        save_pdf_document(&mut doc, &output_path)?;
 
-        let original_size = fs::metadata(&file_path)?.len();
-        let new_size = fs::metadata(&output_path)?.len();
+        let original_size = fs::metadata(&file_path)
+            .map_err(|error| pdf_path_error("读取文件信息", Path::new(&file_path), error))?
+            .len();
+        let new_size = fs::metadata(&output_path)
+            .map_err(|error| pdf_path_error("读取文件信息", Path::new(&output_path), error))?
+            .len();
 
         Ok(ProcessResult {
             success: true,
@@ -912,7 +1020,7 @@ pub async fn images_to_pdf(
         });
 
         doc.trailer.set("Root", catalog_id);
-        doc.save(&output_path)?;
+        save_pdf_document(&mut doc, &output_path)?;
 
         Ok(ProcessResult {
             success: true,
@@ -932,7 +1040,7 @@ pub async fn rotate_pages(
     output_path: String,
 ) -> Result<ProcessResult, PdfError> {
     run_blocking(move || {
-        let mut doc = Document::load(&file_path)?;
+        let mut doc = load_pdf_document(&file_path)?;
         let mut all_pages: Vec<u32> = doc.get_pages().keys().cloned().collect();
         all_pages.sort();
 
@@ -956,7 +1064,7 @@ pub async fn rotate_pages(
             }
         }
 
-        doc.save(&output_path)?;
+        save_pdf_document(&mut doc, &output_path)?;
 
         Ok(ProcessResult {
             success: true,
@@ -981,7 +1089,7 @@ pub async fn reorder_pages(
     run_blocking(move || {
         let total_pages = new_order.len();
         let mut reordered_doc = reordered_pdf_document(&file_path, &new_order)?;
-        reordered_doc.save(&output_path)?;
+        save_pdf_document(&mut reordered_doc, &output_path)?;
 
         Ok(ProcessResult {
             success: true,
@@ -995,6 +1103,7 @@ pub async fn reorder_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lopdf::{dictionary, Stream};
     use tempfile::tempdir;
 
     fn object_to_f32(object: &Object) -> Result<f32, PdfError> {
@@ -1022,26 +1131,63 @@ mod tests {
         }
     }
 
+    fn create_test_pdf(path: &Path, width: i64, height: i64) -> Result<(), PdfError> {
+        let mut doc = Document::with_version("1.5");
+        let resources_id = doc.add_object(dictionary! {});
+        let content_id = doc.add_object(Stream::new(dictionary! {}, Vec::new()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "MediaBox" => vec![0.into(), 0.into(), width.into(), height.into()],
+            "Resources" => resources_id,
+            "Contents" => content_id,
+        });
+        let pages_id = doc.add_object(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        });
+
+        if let Ok(Object::Dictionary(page_dict)) = doc.get_object_mut(page_id) {
+            page_dict.set("Parent", pages_id);
+        }
+
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+
+        doc.trailer.set("Root", catalog_id);
+        save_pdf_document(&mut doc, path)
+    }
+
+    fn create_merge_fixture_pdfs(temp_dir: &Path) -> Result<Vec<String>, PdfError> {
+        let page_sizes = [(320, 480), (612, 792), (420, 420)];
+        page_sizes
+            .iter()
+            .enumerate()
+            .map(|(index, (width, height))| {
+                let path = temp_dir.join(format!("fixture-{}.pdf", index + 1));
+                create_test_pdf(&path, *width, *height)?;
+                Ok(path.to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
     #[test]
     fn merge_preserves_page_sizes_from_source_documents() -> Result<(), PdfError> {
-        let input_paths = vec![
-            "../test/plot_01_embedding.pdf".to_string(),
-            "../test/plot_03_pseudotime_dist.pdf".to_string(),
-            "../test/plot_05_fate_probs.pdf".to_string(),
-        ];
-
         let temp_dir = tempdir()?;
+        let input_paths = create_merge_fixture_pdfs(temp_dir.path())?;
         let output_path = temp_dir.path().join("merged.pdf");
 
         let mut merged_doc = merge_pdf_documents(&input_paths)?;
-        merged_doc.save(&output_path)?;
+        save_pdf_document(&mut merged_doc, &output_path)?;
 
-        let merged_doc = Document::load(&output_path)?;
+        let merged_doc = load_pdf_document(&output_path)?;
         let merged_pages = merged_doc.get_pages();
         assert_eq!(merged_pages.len(), input_paths.len());
 
         for (source_path, (_, merged_page_id)) in input_paths.iter().zip(merged_pages.into_iter()) {
-            let source_doc = Document::load(source_path)?;
+            let source_doc = load_pdf_document(source_path)?;
             let (_, source_page_id) =
                 source_doc.get_pages().into_iter().next().ok_or_else(|| {
                     PdfError::InvalidOperation("Source PDF has no pages".to_string())
@@ -1058,32 +1204,28 @@ mod tests {
 
     #[test]
     fn reorder_preserves_requested_page_sequence() -> Result<(), PdfError> {
-        let source_paths = vec![
-            "../test/plot_01_embedding.pdf".to_string(),
-            "../test/plot_03_pseudotime_dist.pdf".to_string(),
-            "../test/plot_05_fate_probs.pdf".to_string(),
-        ];
         let requested_order = vec![3, 1, 2];
-        let expected_source_paths = [
-            "../test/plot_05_fate_probs.pdf",
-            "../test/plot_01_embedding.pdf",
-            "../test/plot_03_pseudotime_dist.pdf",
-        ];
 
         let temp_dir = tempdir()?;
+        let source_paths = create_merge_fixture_pdfs(temp_dir.path())?;
+        let expected_source_paths = [
+            source_paths[2].clone(),
+            source_paths[0].clone(),
+            source_paths[1].clone(),
+        ];
         let merged_input_path = temp_dir.path().join("merged-input.pdf");
         let output_path = temp_dir.path().join("reordered.pdf");
 
         let mut merged_doc = merge_pdf_documents(&source_paths)?;
-        merged_doc.save(&merged_input_path)?;
+        save_pdf_document(&mut merged_doc, &merged_input_path)?;
 
         let mut reordered_doc = reordered_pdf_document(
             merged_input_path.to_string_lossy().as_ref(),
             &requested_order,
         )?;
-        reordered_doc.save(&output_path)?;
+        save_pdf_document(&mut reordered_doc, &output_path)?;
 
-        let reordered_doc = Document::load(&output_path)?;
+        let reordered_doc = load_pdf_document(&output_path)?;
         let reordered_pages = reordered_doc.get_pages();
         assert_eq!(reordered_pages.len(), requested_order.len());
 
@@ -1091,7 +1233,7 @@ mod tests {
             .iter()
             .zip(reordered_pages.into_iter())
         {
-            let source_doc = Document::load(source_path)?;
+            let source_doc = load_pdf_document(source_path)?;
             let (_, source_page_id) =
                 source_doc.get_pages().into_iter().next().ok_or_else(|| {
                     PdfError::InvalidOperation("Source PDF has no pages".to_string())
@@ -1139,17 +1281,13 @@ mod tests {
 
     #[test]
     fn reorder_rejects_duplicate_page_numbers() {
-        let source_paths = vec![
-            "../test/plot_01_embedding.pdf".to_string(),
-            "../test/plot_03_pseudotime_dist.pdf".to_string(),
-            "../test/plot_05_fate_probs.pdf".to_string(),
-        ];
         let temp_dir = tempdir().expect("temp dir should be created");
+        let source_paths =
+            create_merge_fixture_pdfs(temp_dir.path()).expect("fixture PDFs should be created");
         let merged_input_path = temp_dir.path().join("merged-input.pdf");
         let mut merged_doc =
             merge_pdf_documents(&source_paths).expect("merge fixture should be created");
-        merged_doc
-            .save(&merged_input_path)
+        save_pdf_document(&mut merged_doc, &merged_input_path)
             .expect("merged fixture should be saved");
 
         let error =
