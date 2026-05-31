@@ -2,8 +2,11 @@ use lopdf::{Document, Object, ObjectId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
+#[cfg(target_os = "linux")]
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -586,7 +589,7 @@ fn pdftoppm_search_dirs() -> Vec<PathBuf> {
 
 fn resolve_brew_pdftoppm() -> Option<PathBuf> {
     for brew_path in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"] {
-        let output = match std::process::Command::new(brew_path)
+        let output = match Command::new(brew_path)
             .args(["--prefix", "poppler"])
             .output()
         {
@@ -611,10 +614,7 @@ fn resolve_brew_pdftoppm() -> Option<PathBuf> {
 
 #[cfg(target_os = "windows")]
 fn resolve_windows_where_pdftoppm() -> Option<PathBuf> {
-    let output = std::process::Command::new("where")
-        .arg("pdftoppm")
-        .output()
-        .ok()?;
+    let output = Command::new("where").arg("pdftoppm").output().ok()?;
 
     if !output.status.success() {
         return None;
@@ -863,6 +863,72 @@ fn find_pdftoppm() -> Option<PathBuf> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn filtered_appdir_ld_library_path(current: &OsStr, app_dir: &Path) -> Option<OsString> {
+    let entries: Vec<PathBuf> = env::split_paths(current)
+        .filter(|entry| !entry.starts_with(app_dir))
+        .collect();
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    env::join_paths(entries).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn set_or_remove_env(command: &mut Command, key: &str, value: Option<OsString>) {
+    match value {
+        Some(value) if !value.is_empty() => {
+            command.env(key, value);
+        }
+        _ => {
+            command.env_remove(key);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_external_tool_environment(command: &mut Command, program: &Path) {
+    let app_dir = env::var_os("APPDIR").map(PathBuf::from);
+    let program_is_bundled = app_dir
+        .as_deref()
+        .map(|app_dir| program.starts_with(app_dir))
+        .unwrap_or(false);
+
+    if program_is_bundled {
+        return;
+    }
+
+    let launched_from_appimage = app_dir.is_some() || env::var_os("APPIMAGE").is_some();
+
+    if let Some(original_ld_library_path) = env::var_os("LD_LIBRARY_PATH_ORIG") {
+        set_or_remove_env(command, "LD_LIBRARY_PATH", Some(original_ld_library_path));
+    } else if let (Some(current_ld_library_path), Some(app_dir)) =
+        (env::var_os("LD_LIBRARY_PATH"), app_dir.as_deref())
+    {
+        set_or_remove_env(
+            command,
+            "LD_LIBRARY_PATH",
+            filtered_appdir_ld_library_path(&current_ld_library_path, app_dir),
+        );
+    }
+
+    if launched_from_appimage {
+        command.env_remove("LD_PRELOAD");
+        command.env_remove("LD_AUDIT");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_external_tool_environment(_command: &mut Command, _program: &Path) {}
+
+fn external_tool_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    configure_external_tool_environment(&mut command, program);
+    command
+}
+
 /// Convert PDF pages to images
 #[tauri::command]
 pub async fn pdf_to_images(
@@ -872,8 +938,6 @@ pub async fn pdf_to_images(
     dpi: Option<u32>,
 ) -> Result<ProcessResult, PdfError> {
     run_blocking(move || {
-        use std::process::Command;
-
         fs::create_dir_all(&output_dir)?;
 
         let pdftoppm_path = find_pdftoppm().ok_or_else(|| {
@@ -903,7 +967,7 @@ pub async fn pdf_to_images(
         let run_prefix = build_pdf_to_images_prefix(base_name)?;
         let output_prefix = Path::new(&output_dir).join(&run_prefix);
 
-        let output = Command::new(&pdftoppm_path)
+        let output = external_tool_command(&pdftoppm_path)
             .arg(format_flag)
             .arg("-r")
             .arg(dpi_value.to_string())
@@ -1277,6 +1341,31 @@ mod tests {
         assert_eq!(count_generated_image_files(dir, "report", "png")?, 2);
 
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_ld_library_path_filter_removes_appdir_entries() {
+        let app_dir = Path::new("/tmp/.mount_pdf-toolkit");
+        let current = std::ffi::OsString::from(
+            "/tmp/.mount_pdf-toolkit/usr/lib:/usr/lib:/tmp/.mount_pdf-toolkit/lib",
+        );
+
+        let filtered = filtered_appdir_ld_library_path(&current, app_dir)
+            .expect("non-appdir library path should remain");
+        let entries: Vec<PathBuf> = env::split_paths(&filtered).collect();
+
+        assert_eq!(entries, vec![PathBuf::from("/usr/lib")]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_ld_library_path_filter_returns_none_when_only_appdir_entries_remain() {
+        let app_dir = Path::new("/tmp/.mount_pdf-toolkit");
+        let current =
+            std::ffi::OsString::from("/tmp/.mount_pdf-toolkit/usr/lib:/tmp/.mount_pdf-toolkit/lib");
+
+        assert!(filtered_appdir_ld_library_path(&current, app_dir).is_none());
     }
 
     #[test]
