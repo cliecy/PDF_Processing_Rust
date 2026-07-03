@@ -690,8 +690,7 @@ pub async fn split_pdf(
             .and_then(|s| s.to_str())
             .unwrap_or("split");
 
-        let mut all_pages: Vec<u32> = doc.get_pages().keys().cloned().collect();
-        all_pages.sort();
+        let all_pages = sorted_page_numbers(&doc);
 
         if all_pages.len() != total_pages {
             return Err(PdfError::InvalidOperation(format!(
@@ -724,6 +723,7 @@ pub async fn split_pdf(
 
             if !pages_to_delete.is_empty() {
                 new_doc.delete_pages(&pages_to_delete);
+                new_doc.prune_objects();
             }
 
             let output_path = format!("{}/{}_{}.pdf", output_dir, base_name, idx + 1);
@@ -740,6 +740,65 @@ pub async fn split_pdf(
     .await
 }
 
+fn sorted_page_numbers(doc: &Document) -> Vec<u32> {
+    let mut all_pages: Vec<u32> = doc.get_pages().keys().cloned().collect();
+    all_pages.sort();
+    all_pages
+}
+
+fn delete_pages_document(file_path: &str, pages_to_delete: &[u32]) -> Result<Document, PdfError> {
+    let mut doc = load_pdf_document(file_path)?;
+    let all_pages = sorted_page_numbers(&doc);
+
+    let page_count = all_pages.len() as u32;
+    let actual_pages_to_delete: Vec<u32> = pages_to_delete
+        .iter()
+        .filter(|&&idx| idx >= 1 && idx <= page_count)
+        .map(|&idx| all_pages[(idx - 1) as usize])
+        .collect();
+
+    if actual_pages_to_delete.len() >= all_pages.len() {
+        return Err(PdfError::InvalidOperation(
+            "Cannot delete all pages: the output PDF would have no pages".to_string(),
+        ));
+    }
+
+    doc.delete_pages(&actual_pages_to_delete);
+    doc.prune_objects();
+    Ok(doc)
+}
+
+fn extract_pages_document(
+    file_path: &str,
+    pages_to_extract: &[u32],
+) -> Result<Document, PdfError> {
+    let mut doc = load_pdf_document(file_path)?;
+    let all_pages = sorted_page_numbers(&doc);
+
+    let page_count = all_pages.len() as u32;
+    let actual_pages_to_extract: Vec<u32> = pages_to_extract
+        .iter()
+        .filter(|&&idx| idx >= 1 && idx <= page_count)
+        .map(|&idx| all_pages[(idx - 1) as usize])
+        .collect();
+
+    if actual_pages_to_extract.is_empty() {
+        return Err(PdfError::InvalidOperation(
+            "No valid pages to extract: the output PDF would have no pages".to_string(),
+        ));
+    }
+
+    let pages_to_delete: Vec<u32> = all_pages
+        .iter()
+        .filter(|&&p| !actual_pages_to_extract.contains(&p))
+        .cloned()
+        .collect();
+
+    doc.delete_pages(&pages_to_delete);
+    doc.prune_objects();
+    Ok(doc)
+}
+
 /// Delete specific pages from PDF
 #[tauri::command]
 pub async fn delete_pages(
@@ -748,19 +807,7 @@ pub async fn delete_pages(
     output_path: String,
 ) -> Result<ProcessResult, PdfError> {
     run_blocking(move || {
-        let doc = load_pdf_document(&file_path)?;
-        let mut all_pages: Vec<u32> = doc.get_pages().keys().cloned().collect();
-        all_pages.sort();
-
-        let page_count = all_pages.len() as u32;
-        let actual_pages_to_delete: Vec<u32> = pages_to_delete
-            .iter()
-            .filter(|&&idx| idx >= 1 && idx <= page_count)
-            .map(|&idx| all_pages[(idx - 1) as usize])
-            .collect();
-
-        let mut new_doc = doc.clone();
-        new_doc.delete_pages(&actual_pages_to_delete);
+        let mut new_doc = delete_pages_document(&file_path, &pages_to_delete)?;
         save_pdf_document(&mut new_doc, &output_path)?;
 
         Ok(ProcessResult {
@@ -780,25 +827,7 @@ pub async fn extract_pages(
     output_path: String,
 ) -> Result<ProcessResult, PdfError> {
     run_blocking(move || {
-        let doc = load_pdf_document(&file_path)?;
-        let mut all_pages: Vec<u32> = doc.get_pages().keys().cloned().collect();
-        all_pages.sort();
-
-        let page_count = all_pages.len() as u32;
-        let actual_pages_to_extract: Vec<u32> = pages_to_extract
-            .iter()
-            .filter(|&&idx| idx >= 1 && idx <= page_count)
-            .map(|&idx| all_pages[(idx - 1) as usize])
-            .collect();
-
-        let pages_to_delete: Vec<u32> = all_pages
-            .iter()
-            .filter(|&&p| !actual_pages_to_extract.contains(&p))
-            .cloned()
-            .collect();
-
-        let mut new_doc = doc.clone();
-        new_doc.delete_pages(&pages_to_delete);
+        let mut new_doc = extract_pages_document(&file_path, &pages_to_extract)?;
         save_pdf_document(&mut new_doc, &output_path)?;
 
         Ok(ProcessResult {
@@ -1011,28 +1040,62 @@ pub async fn pdf_to_images(
     .await
 }
 
-/// Convert images to PDF
-#[tauri::command]
-pub async fn images_to_pdf(
-    image_paths: Vec<String>,
-    output_path: String,
-) -> Result<ProcessResult, PdfError> {
-    run_blocking(move || {
-        use image::GenericImageView;
-        use lopdf::Stream;
-        use lopdf::dictionary;
+fn images_to_pdf_document(image_paths: &[String]) -> Result<Document, PdfError> {
+    use image::{ColorType, GenericImageView, ImageFormat, ImageReader};
+    use lopdf::Stream;
+    use lopdf::dictionary;
 
-        let mut doc = Document::with_version("1.5");
-        let mut pages_kids = Vec::new();
+    let mut doc = Document::with_version("1.5");
+    let mut pages_kids = Vec::new();
 
-        for (_idx, image_path) in image_paths.iter().enumerate() {
-            let img = image::open(image_path)?;
-            let (width, height) = img.dimensions();
+    for image_path in image_paths.iter() {
+        let reader = ImageReader::open(image_path)?.with_guessed_format()?;
+        let format = reader.format();
+        let img = reader.decode()?;
+        let (width, height) = img.dimensions();
 
-            let rgb_img = img.to_rgb8();
-            let img_data = rgb_img.into_raw();
+        let image_stream = if format == Some(ImageFormat::Jpeg)
+            && matches!(img.color(), ColorType::Rgb8 | ColorType::L8)
+        {
+            // Embed the original JPEG bytes directly: no re-encoding, no size blowup
+            let color_space = if img.color() == ColorType::L8 {
+                "DeviceGray"
+            } else {
+                "DeviceRGB"
+            };
+            Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Image",
+                    "Width" => width as i64,
+                    "Height" => height as i64,
+                    "ColorSpace" => color_space,
+                    "BitsPerComponent" => 8,
+                    "Filter" => "DCTDecode",
+                },
+                fs::read(image_path)?,
+            )
+        } else {
+            let img_data = if img.color().has_alpha() {
+                // Composite transparent pixels over white instead of dropping alpha
+                let rgba = img.to_rgba8();
+                let mut data = Vec::with_capacity((width as usize) * (height as usize) * 3);
+                for pixel in rgba.pixels() {
+                    let [r, g, b, a] = pixel.0;
+                    let alpha = a as u32;
+                    for channel in [r, g, b] {
+                        data.push(
+                            ((channel as u32 * alpha + 255 * (255 - alpha)) / 255) as u8,
+                        );
+                    }
+                }
+                data
+            } else {
+                img.to_rgb8().into_raw()
+            };
 
-            let image_stream = Stream::new(
+            // No Filter here: doc.compress() below deflates filterless streams
+            Stream::new(
                 dictionary! {
                     "Type" => "XObject",
                     "Subtype" => "Image",
@@ -1042,48 +1105,62 @@ pub async fn images_to_pdf(
                     "BitsPerComponent" => 8,
                 },
                 img_data,
-            );
+            )
+        };
 
-            let image_id = doc.add_object(image_stream);
-            let resources_id = doc.add_object(dictionary! {
-                "XObject" => dictionary! {
-                    "Im1" => image_id,
-                },
-            });
-
-            let content = format!("q {} 0 0 {} 0 0 cm /Im1 Do Q", width, height);
-            let content_id = doc.add_object(Stream::new(dictionary! {}, content.into_bytes()));
-
-            let page_id = doc.add_object(dictionary! {
-                "Type" => "Page",
-                "MediaBox" => vec![0.into(), 0.into(), (width as i64).into(), (height as i64).into()],
-                "Resources" => resources_id,
-                "Contents" => content_id,
-            });
-
-            pages_kids.push(page_id.into());
-        }
-
-        let pages_id = doc.add_object(dictionary! {
-            "Type" => "Pages",
-            "Kids" => pages_kids.clone(),
-            "Count" => pages_kids.len() as i64,
+        let image_id = doc.add_object(image_stream);
+        let resources_id = doc.add_object(dictionary! {
+            "XObject" => dictionary! {
+                "Im1" => image_id,
+            },
         });
 
-        for kid in &pages_kids {
-            if let Object::Reference(page_ref) = kid {
-                if let Ok(Object::Dictionary(ref mut page_dict)) = doc.get_object_mut(*page_ref) {
-                    page_dict.set("Parent", pages_id);
-                }
+        let content = format!("q {} 0 0 {} 0 0 cm /Im1 Do Q", width, height);
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.into_bytes()));
+
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "MediaBox" => vec![0.into(), 0.into(), (width as i64).into(), (height as i64).into()],
+            "Resources" => resources_id,
+            "Contents" => content_id,
+        });
+
+        pages_kids.push(page_id.into());
+    }
+
+    let pages_id = doc.add_object(dictionary! {
+        "Type" => "Pages",
+        "Kids" => pages_kids.clone(),
+        "Count" => pages_kids.len() as i64,
+    });
+
+    for kid in &pages_kids {
+        if let Object::Reference(page_ref) = kid {
+            if let Ok(Object::Dictionary(ref mut page_dict)) = doc.get_object_mut(*page_ref) {
+                page_dict.set("Parent", pages_id);
             }
         }
+    }
 
-        let catalog_id = doc.add_object(dictionary! {
-            "Type" => "Catalog",
-            "Pages" => pages_id,
-        });
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
 
-        doc.trailer.set("Root", catalog_id);
+    doc.trailer.set("Root", catalog_id);
+    doc.compress();
+
+    Ok(doc)
+}
+
+/// Convert images to PDF
+#[tauri::command]
+pub async fn images_to_pdf(
+    image_paths: Vec<String>,
+    output_path: String,
+) -> Result<ProcessResult, PdfError> {
+    run_blocking(move || {
+        let mut doc = images_to_pdf_document(&image_paths)?;
         save_pdf_document(&mut doc, &output_path)?;
 
         Ok(ProcessResult {
@@ -1366,6 +1443,128 @@ mod tests {
             std::ffi::OsString::from("/tmp/.mount_pdf-toolkit/usr/lib:/tmp/.mount_pdf-toolkit/lib");
 
         assert!(filtered_appdir_ld_library_path(&current, app_dir).is_none());
+    }
+
+    #[test]
+    fn delete_all_pages_is_rejected() {
+        let error = delete_pages_document("../test/plot_01_embedding.pdf", &[1])
+            .expect_err("deleting every page should fail");
+
+        assert!(
+            error.to_string().contains("Cannot delete all pages"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn extract_with_no_valid_pages_is_rejected() {
+        let error = extract_pages_document("../test/plot_01_embedding.pdf", &[99])
+            .expect_err("extracting only out-of-range pages should fail");
+
+        assert!(
+            error.to_string().contains("No valid pages to extract"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn delete_pages_prunes_orphaned_objects() -> Result<(), PdfError> {
+        let source_paths = vec![
+            "../test/plot_01_embedding.pdf".to_string(),
+            "../test/plot_03_pseudotime_dist.pdf".to_string(),
+            "../test/plot_05_fate_probs.pdf".to_string(),
+        ];
+
+        let temp_dir = tempdir()?;
+        let input_path = temp_dir.path().join("input.pdf");
+        let output_path = temp_dir.path().join("output.pdf");
+
+        let mut merged_doc = merge_pdf_documents(&source_paths)?;
+        merged_doc.save(&input_path)?;
+
+        let mut new_doc =
+            delete_pages_document(input_path.to_string_lossy().as_ref(), &[2, 3])?;
+        new_doc.save(&output_path)?;
+
+        let saved_doc = Document::load(&output_path)?;
+        assert_eq!(saved_doc.get_pages().len(), 1);
+
+        // Only page 1 (from plot_01) is kept, so the output should not be much
+        // larger than that page's source document; without pruning it would
+        // stay close to the full merged input size.
+        let retained_source_size = fs::metadata("../test/plot_01_embedding.pdf")?.len();
+        let output_size = fs::metadata(&output_path)?.len();
+        assert!(
+            output_size <= retained_source_size * 11 / 10,
+            "deleted pages should be pruned from the output: retained source {} bytes, output {} bytes",
+            retained_source_size,
+            output_size
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn images_to_pdf_embeds_jpeg_directly_and_composites_alpha() -> Result<(), PdfError> {
+        use image::{Rgb, RgbImage, Rgba, RgbaImage};
+
+        let temp_dir = tempdir()?;
+        let jpeg_path = temp_dir.path().join("photo.jpg");
+        let png_path = temp_dir.path().join("transparent.png");
+
+        RgbImage::from_pixel(64, 64, Rgb([200, 30, 30])).save(&jpeg_path)?;
+        RgbaImage::from_pixel(32, 32, Rgba([0, 0, 0, 0])).save(&png_path)?;
+
+        let mut doc = images_to_pdf_document(&[
+            jpeg_path.to_string_lossy().into_owned(),
+            png_path.to_string_lossy().into_owned(),
+        ])?;
+        let output_path = temp_dir.path().join("output.pdf");
+        doc.save(&output_path)?;
+
+        let saved_doc = Document::load(&output_path)?;
+        assert_eq!(saved_doc.get_pages().len(), 2);
+
+        let mut found_jpeg = false;
+        let mut found_flate = false;
+        for object in saved_doc.objects.values() {
+            let Object::Stream(stream) = object else {
+                continue;
+            };
+            if stream.dict.get(b"Subtype").and_then(Object::as_name_str).ok() != Some("Image") {
+                continue;
+            }
+
+            match stream.dict.get(b"Filter").and_then(Object::as_name_str) {
+                Ok("DCTDecode") => {
+                    assert_eq!(
+                        stream.content,
+                        fs::read(&jpeg_path)?,
+                        "JPEG bytes should be embedded unchanged"
+                    );
+                    found_jpeg = true;
+                }
+                Ok("FlateDecode") => {
+                    // lopdf refuses decompressed_content() on Subtype /Image
+                    // streams, so strip the key on a clone before inflating
+                    let mut stream = stream.clone();
+                    stream.dict.remove(b"Subtype");
+                    let data = stream.decompressed_content()?;
+                    assert_eq!(
+                        &data[..3],
+                        &[255, 255, 255],
+                        "transparent pixels should be composited over white"
+                    );
+                    found_flate = true;
+                }
+                other => panic!("unexpected image filter: {:?}", other),
+            }
+        }
+
+        assert!(found_jpeg, "output should contain a DCTDecode image stream");
+        assert!(found_flate, "output should contain a FlateDecode image stream");
+
+        Ok(())
     }
 
     #[test]

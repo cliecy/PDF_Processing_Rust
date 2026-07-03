@@ -19,14 +19,18 @@ export default function ExtractPages() {
       const paths = await selectPdfFiles(false);
       if (paths && paths.length > 0) {
         const path = paths[0];
+        const info = await getPdfInfo(path);
         setFilePath(path);
         setFileName(path.split(/[/\\]/).pop() || path);
-        const info = await getPdfInfo(path);
         setPdfInfo(info);
         setSelectedPages(new Set());
       }
     } catch (error) {
-      console.error('Error selecting file:', error);
+      setResult({
+        success: false,
+        message: `无法读取 PDF 文件：${String(error)}`,
+        output_path: null,
+      });
     }
   };
 
