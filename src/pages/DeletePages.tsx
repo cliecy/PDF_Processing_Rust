@@ -19,14 +19,18 @@ export default function DeletePages() {
       const paths = await selectPdfFiles(false);
       if (paths && paths.length > 0) {
         const path = paths[0];
+        const info = await getPdfInfo(path);
         setFilePath(path);
         setFileName(path.split(/[/\\]/).pop() || path);
-        const info = await getPdfInfo(path);
         setPdfInfo(info);
         setSelectedPages(new Set());
       }
     } catch (error) {
-      console.error('Error selecting file:', error);
+      setResult({
+        success: false,
+        message: `无法读取 PDF 文件：${String(error)}`,
+        output_path: null,
+      });
     }
   };
 
@@ -40,8 +44,11 @@ export default function DeletePages() {
     setSelectedPages(newSelected);
   };
 
+  const allPagesSelected =
+    pdfInfo !== null && selectedPages.size >= pdfInfo.page_count;
+
   const handleDelete = async () => {
-    if (!filePath || selectedPages.size === 0) return;
+    if (!filePath || selectedPages.size === 0 || allPagesSelected) return;
 
     try {
       const outputPath = await selectOutputFile('output.pdf');
@@ -177,6 +184,11 @@ export default function DeletePages() {
                   {(pdfInfo?.page_count || 0) - selectedPages.size}
                 </span> 页
               </p>
+              {allPagesSelected && (
+                <p className="text-xs text-red-400 mt-2">
+                  不能删除全部页面，请至少保留 1 页
+                </p>
+              )}
             </div>
           )}
 
@@ -185,7 +197,7 @@ export default function DeletePages() {
             variant="danger"
             onClick={handleDelete}
             loading={loading}
-            disabled={selectedPages.size === 0}
+            disabled={selectedPages.size === 0 || allPagesSelected}
             icon={<Trash2 size={18} />}
           >
             删除选中的 {selectedPages.size} 页
