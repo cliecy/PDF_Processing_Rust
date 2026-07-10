@@ -9,7 +9,7 @@ import {
   RotateCw,
   Image,
   FileImage,
-  Settings,
+  ListOrdered,
   FileText,
 } from 'lucide-react';
 
@@ -33,6 +33,7 @@ const navItems: NavItem[] = [
   { id: 'extract', label: '提取页面', icon: <FileOutput size={20} />, color: 'text-amber-400' },
   { id: 'compress', label: 'PDF 压缩', icon: <Minimize2 size={20} />, color: 'text-green-400' },
   { id: 'rotate', label: '旋转页面', icon: <RotateCw size={20} />, color: 'text-blue-400' },
+  { id: 'reorder', label: '页面重排', icon: <ListOrdered size={20} />, color: 'text-cyan-400' },
   { id: 'images-to-pdf', label: '图片转 PDF', icon: <FileImage size={20} />, color: 'text-purple-400' },
   { id: 'pdf-to-images', label: 'PDF 转图片', icon: <Image size={20} />, color: 'text-pink-400' },
 ];
@@ -80,13 +81,6 @@ export default function Sidebar({ currentPage, onNavigate }: SidebarProps) {
         </div>
       </nav>
 
-      {/* Settings */}
-      <div className="p-4 border-t border-[#2e2e38]">
-        <button className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-zinc-400 hover:bg-[#1e1e26] hover:text-white transition-all duration-200">
-          <Settings size={20} />
-          <span className="text-sm font-medium">设置</span>
-        </button>
-      </div>
     </aside>
   );
 }

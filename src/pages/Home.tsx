@@ -8,6 +8,7 @@ import {
   RotateCw,
   FileImage,
   Image,
+  ListOrdered,
 } from 'lucide-react';
 
 interface HomeProps {
@@ -64,6 +65,14 @@ const editTools: ToolCard[] = [
     color: 'text-blue-400',
     bgColor: 'bg-blue-500/10',
   },
+  {
+    id: 'reorder',
+    title: '页面重排',
+    description: '调整 PDF 页面的先后顺序',
+    icon: <ListOrdered size={24} />,
+    color: 'text-cyan-400',
+    bgColor: 'bg-cyan-500/10',
+  },
 ];
 
 const convertTools: ToolCard[] = [
@@ -118,7 +127,7 @@ export default function Home({ onNavigate }: HomeProps) {
           <span className="gradient-text">PDF Toolkit</span>
         </h1>
         <p className="text-zinc-400 text-lg">
-          专业的 PDF 处理工具，支持 macOS 和 Windows
+          专业的 PDF 处理工具，支持 macOS、Windows 和 Linux
         </p>
       </div>
 

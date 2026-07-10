@@ -5,6 +5,13 @@ import Button from '../components/Button';
 import ResultCard from '../components/ResultCard';
 import { useTauri, ProcessResult, PdfInfo } from '../hooks/useTauri';
 
+const OPTIMIZATION_LEVELS = [
+  { value: 25, label: '轻度优化', shortLabel: '轻度' },
+  { value: 50, label: '标准优化', shortLabel: '标准' },
+  { value: 75, label: '深度优化', shortLabel: '深度' },
+  { value: 90, label: '最大优化', shortLabel: '最大' },
+] as const;
+
 export default function CompressPdf() {
   const [filePath, setFilePath] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string>('');
@@ -62,13 +69,9 @@ export default function CompressPdf() {
     setResult(null);
   };
 
-  const qualityLabels: Record<number, string> = {
-    25: '轻度优化',
-    50: '标准优化',
-    75: '深度优化',
-    90: '强力优化',
-    100: '最大优化',
-  };
+  const selectedLevelIndex = OPTIMIZATION_LEVELS.findIndex(
+    (level) => level.value === quality
+  );
 
   if (result) {
     return (
@@ -137,23 +140,23 @@ export default function CompressPdf() {
             <div className="space-y-4">
               <input
                 type="range"
-                min="25"
-                max="100"
-                step="25"
-                value={quality}
-                onChange={(e) => setQuality(parseInt(e.target.value))}
+                min="0"
+                max={OPTIMIZATION_LEVELS.length - 1}
+                step="1"
+                value={selectedLevelIndex}
+                onChange={(e) =>
+                  setQuality(OPTIMIZATION_LEVELS[Number(e.target.value)].value)
+                }
                 className="w-full h-2 bg-[#22222b] rounded-lg appearance-none cursor-pointer accent-green-500"
               />
               <div className="flex justify-between text-xs text-zinc-500">
-                <span>轻度</span>
-                <span>标准</span>
-                <span>深度</span>
-                <span>强力</span>
-                <span>最大</span>
+                {OPTIMIZATION_LEVELS.map((level) => (
+                  <span key={level.value}>{level.shortLabel}</span>
+                ))}
               </div>
               <div className="text-center">
                 <span className="inline-block px-4 py-2 bg-green-500/10 rounded-lg text-green-400 font-medium">
-                  {qualityLabels[quality]} ({quality}%)
+                  {OPTIMIZATION_LEVELS[selectedLevelIndex].label} ({quality}%)
                 </span>
               </div>
             </div>

@@ -9,6 +9,7 @@ import CompressPdf from './pages/CompressPdf';
 import RotatePdf from './pages/RotatePdf';
 import ImagesToPdf from './pages/ImagesToPdf';
 import PdfToImages from './pages/PdfToImages';
+import ReorderPages from './pages/ReorderPages';
 
 export type PageType =
   | 'home'
@@ -18,6 +19,7 @@ export type PageType =
   | 'extract'
   | 'compress'
   | 'rotate'
+  | 'reorder'
   | 'images-to-pdf'
   | 'pdf-to-images';
 
@@ -40,6 +42,8 @@ function App() {
         return <CompressPdf />;
       case 'rotate':
         return <RotatePdf />;
+      case 'reorder':
+        return <ReorderPages />;
       case 'images-to-pdf':
         return <ImagesToPdf />;
       case 'pdf-to-images':

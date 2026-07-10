@@ -73,10 +73,19 @@ export default function SplitPdf() {
     value: number
   ) => {
     const newRanges = [...ranges];
-    newRanges[index][field] = Math.max(
+    const nextValue = Math.max(
       1,
       Math.min(value, pdfInfo?.page_count || 1)
     );
+    const nextRange = { ...newRanges[index], [field]: nextValue };
+
+    if (field === 'start' && nextRange.start > nextRange.end) {
+      nextRange.end = nextRange.start;
+    } else if (field === 'end' && nextRange.end < nextRange.start) {
+      nextRange.start = nextRange.end;
+    }
+
+    newRanges[index] = nextRange;
     setRanges(newRanges);
   };
 
@@ -112,6 +121,8 @@ export default function SplitPdf() {
     setRanges([{ start: 1, end: 1 }]);
     setResult(null);
   };
+
+  const hasInvalidRanges = ranges.some((range) => range.start > range.end);
 
   if (result) {
     return (
@@ -263,6 +274,7 @@ export default function SplitPdf() {
             variant="primary"
             onClick={handleSplit}
             loading={loading}
+            disabled={hasInvalidRanges}
             icon={<Scissors size={18} />}
           >
             分割 PDF

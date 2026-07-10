@@ -86,10 +86,10 @@ git commit -q -m "chore: bump version to $version"
 
 # ---------- 本地校验 ----------
 if [[ -z ${SKIP_CHECKS:-} ]]; then
-    echo "==> cargo test"
-    (cd src-tauri && cargo test --quiet)
     echo "==> npm run build"
     npm run build >/dev/null
+    echo "==> cargo test"
+    (cd src-tauri && cargo test --locked --quiet)
 fi
 
 # ---------- 推送 main ----------

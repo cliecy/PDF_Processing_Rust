@@ -10,13 +10,24 @@ export interface PdfInfo {
   is_encrypted: boolean;
 }
 
-export interface ProcessResult {
-  success: boolean;
+interface ProcessOutput {
   message: string;
   output_path: string | null;
 }
 
+export interface ProcessResult extends ProcessOutput {
+  success: boolean;
+}
+
 export function useTauri() {
+  const invokeProcess = async (
+    command: string,
+    args: Record<string, unknown>
+  ): Promise<ProcessResult> => {
+    const output = await invoke<ProcessOutput>(command, args);
+    return { success: true, ...output };
+  };
+
   const getPdfInfo = async (filePath: string): Promise<PdfInfo> => {
     return await invoke('get_pdf_info', { filePath });
   };
@@ -25,7 +36,7 @@ export function useTauri() {
     filePaths: string[],
     outputPath: string
   ): Promise<ProcessResult> => {
-    return await invoke('merge_pdfs', { filePaths, outputPath });
+    return await invokeProcess('merge_pdfs', { filePaths, outputPath });
   };
 
   const splitPdf = async (
@@ -33,7 +44,7 @@ export function useTauri() {
     ranges: [number, number][],
     outputDir: string
   ): Promise<ProcessResult> => {
-    return await invoke('split_pdf', { filePath, ranges, outputDir });
+    return await invokeProcess('split_pdf', { filePath, ranges, outputDir });
   };
 
   const deletePages = async (
@@ -41,7 +52,7 @@ export function useTauri() {
     pagesToDelete: number[],
     outputPath: string
   ): Promise<ProcessResult> => {
-    return await invoke('delete_pages', { filePath, pagesToDelete, outputPath });
+    return await invokeProcess('delete_pages', { filePath, pagesToDelete, outputPath });
   };
 
   const extractPages = async (
@@ -49,7 +60,7 @@ export function useTauri() {
     pagesToExtract: number[],
     outputPath: string
   ): Promise<ProcessResult> => {
-    return await invoke('extract_pages', { filePath, pagesToExtract, outputPath });
+    return await invokeProcess('extract_pages', { filePath, pagesToExtract, outputPath });
   };
 
   const compressPdf = async (
@@ -57,7 +68,7 @@ export function useTauri() {
     outputPath: string,
     quality: number
   ): Promise<ProcessResult> => {
-    return await invoke('compress_pdf', { filePath, outputPath, quality });
+    return await invokeProcess('compress_pdf', { filePath, outputPath, quality });
   };
 
   const pdfToImages = async (
@@ -66,7 +77,7 @@ export function useTauri() {
     format: string,
     dpi?: number
   ): Promise<ProcessResult> => {
-    return await invoke('pdf_to_images', { filePath, outputDir, format, dpi });
+    return await invokeProcess('pdf_to_images', { filePath, outputDir, format, dpi });
   };
 
   const openFolder = async (path: string): Promise<void> => {
@@ -77,7 +88,7 @@ export function useTauri() {
     imagePaths: string[],
     outputPath: string
   ): Promise<ProcessResult> => {
-    return await invoke('images_to_pdf', { imagePaths, outputPath });
+    return await invokeProcess('images_to_pdf', { imagePaths, outputPath });
   };
 
   const rotatePages = async (
@@ -86,7 +97,15 @@ export function useTauri() {
     rotation: number,
     outputPath: string
   ): Promise<ProcessResult> => {
-    return await invoke('rotate_pages', { filePath, pages, rotation, outputPath });
+    return await invokeProcess('rotate_pages', { filePath, pages, rotation, outputPath });
+  };
+
+  const reorderPages = async (
+    filePath: string,
+    newOrder: number[],
+    outputPath: string
+  ): Promise<ProcessResult> => {
+    return await invokeProcess('reorder_pages', { filePath, newOrder, outputPath });
   };
 
   const selectPdfFiles = async (multiple = true): Promise<string[] | null> => {
@@ -150,6 +169,7 @@ export function useTauri() {
     pdfToImages,
     imagesToPdf,
     rotatePages,
+    reorderPages,
     openFolder,
     selectPdfFiles,
     selectImageFiles,

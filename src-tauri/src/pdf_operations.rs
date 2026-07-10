@@ -1,6 +1,6 @@
 use lopdf::{Document, Object, ObjectId};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 #[cfg(target_os = "linux")]
 use std::ffi::{OsStr, OsString};
@@ -43,7 +43,6 @@ pub struct PdfInfo {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProcessResult {
-    pub success: bool,
     pub message: String,
     pub output_path: Option<String>,
 }
@@ -58,48 +57,39 @@ where
         .map_err(|error| PdfError::InvalidOperation(format!("Background task failed: {}", error)))?
 }
 
+fn pdf_metadata_string(doc: &Document, key: &[u8]) -> Option<String> {
+    doc.trailer
+        .get(b"Info")
+        .ok()
+        .and_then(|info| info.as_reference().ok())
+        .and_then(|info_ref| doc.get_object(info_ref).ok())
+        .and_then(|object| object.as_dict().ok())
+        .and_then(|dictionary| dictionary.get(key).ok())
+        .and_then(|value| match value {
+            Object::String(bytes, _) => String::from_utf8(bytes.clone()).ok(),
+            _ => None,
+        })
+}
+
+fn load_pdf_info(file_path: &str) -> Result<PdfInfo, PdfError> {
+    let path = Path::new(file_path);
+    let metadata = fs::metadata(path)?;
+    let doc = Document::load(path)?;
+
+    Ok(PdfInfo {
+        page_count: doc.get_pages().len(),
+        file_size: metadata.len(),
+        title: pdf_metadata_string(&doc, b"Title"),
+        author: pdf_metadata_string(&doc, b"Author"),
+        pdf_version: doc.version.clone(),
+        is_encrypted: doc.trailer.get(b"Encrypt").is_ok(),
+    })
+}
+
 /// Get PDF information
 #[tauri::command]
 pub async fn get_pdf_info(file_path: String) -> Result<PdfInfo, PdfError> {
-    run_blocking(move || {
-        let path = Path::new(&file_path);
-        let metadata = fs::metadata(path)?;
-        let doc = Document::load(path)?;
-
-        let page_count = doc.get_pages().len();
-        let pdf_version = doc.version.clone();
-        let is_encrypted = doc.trailer.get(b"Encrypt").is_ok();
-
-        let title = doc
-            .trailer
-            .get(b"Info")
-            .ok()
-            .and_then(|info| info.as_reference().ok())
-            .and_then(|info_ref| doc.get_object(info_ref).ok())
-            .and_then(|info_obj| {
-                if let Object::Dictionary(dict) = info_obj {
-                    dict.get(b"Title").ok().and_then(|t| {
-                        if let Object::String(s, _) = t {
-                            String::from_utf8(s.clone()).ok()
-                        } else {
-                            None
-                        }
-                    })
-                } else {
-                    None
-                }
-            });
-
-        Ok(PdfInfo {
-            page_count,
-            file_size: metadata.len(),
-            title,
-            author: None,
-            pdf_version,
-            is_encrypted,
-        })
-    })
-    .await
+    run_blocking(move || load_pdf_info(&file_path)).await
 }
 
 /// Open folder in system file explorer
@@ -563,7 +553,6 @@ pub async fn merge_pdfs(
         merged_doc.save(&output_path)?;
 
         Ok(ProcessResult {
-            success: true,
             message: format!("Successfully merged {} PDFs", file_paths.len()),
             output_path: Some(output_path),
         })
@@ -579,6 +568,12 @@ pub async fn split_pdf(
     output_dir: String,
 ) -> Result<ProcessResult, PdfError> {
     run_blocking(move || {
+        if ranges.is_empty() {
+            return Err(PdfError::InvalidOperation(
+                "At least one page range is required".to_string(),
+            ));
+        }
+
         let doc = Document::load(&file_path)?;
         let total_pages = doc.get_pages().len();
         let base_name = Path::new(&file_path)
@@ -606,9 +601,7 @@ pub async fn split_pdf(
                 )));
             }
 
-            let pages_to_extract: Vec<u32> = (*start..=*end)
-                .map(|i| all_pages[(i - 1) as usize])
-                .collect();
+            let pages_to_extract: Vec<u32> = (*start..=*end).map(|i| all_pages[i - 1]).collect();
 
             let mut new_doc = doc.clone();
             let pages_to_delete: Vec<u32> = all_pages
@@ -628,7 +621,6 @@ pub async fn split_pdf(
         }
 
         Ok(ProcessResult {
-            success: true,
             message: format!("Successfully split into {} files", output_files.len()),
             output_path: Some(output_dir),
         })
@@ -642,16 +634,44 @@ fn sorted_page_numbers(doc: &Document) -> Vec<u32> {
     all_pages
 }
 
+fn validated_page_numbers(doc: &Document, requested_pages: &[u32]) -> Result<Vec<u32>, PdfError> {
+    let all_pages = sorted_page_numbers(doc);
+    let page_count = all_pages.len() as u32;
+
+    if requested_pages.is_empty() {
+        return Err(PdfError::InvalidOperation(
+            "At least one page must be selected".to_string(),
+        ));
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut validated = Vec::with_capacity(requested_pages.len());
+
+    for &page_index in requested_pages {
+        if page_index < 1 || page_index > page_count {
+            return Err(PdfError::InvalidOperation(format!(
+                "Page {} is outside the valid range 1-{}",
+                page_index, page_count
+            )));
+        }
+
+        if !seen.insert(page_index) {
+            return Err(PdfError::InvalidOperation(format!(
+                "Page {} was selected more than once",
+                page_index
+            )));
+        }
+
+        validated.push(all_pages[(page_index - 1) as usize]);
+    }
+
+    Ok(validated)
+}
+
 fn delete_pages_document(file_path: &str, pages_to_delete: &[u32]) -> Result<Document, PdfError> {
     let mut doc = Document::load(file_path)?;
     let all_pages = sorted_page_numbers(&doc);
-
-    let page_count = all_pages.len() as u32;
-    let actual_pages_to_delete: Vec<u32> = pages_to_delete
-        .iter()
-        .filter(|&&idx| idx >= 1 && idx <= page_count)
-        .map(|&idx| all_pages[(idx - 1) as usize])
-        .collect();
+    let actual_pages_to_delete = validated_page_numbers(&doc, pages_to_delete)?;
 
     if actual_pages_to_delete.len() >= all_pages.len() {
         return Err(PdfError::InvalidOperation(
@@ -664,25 +684,10 @@ fn delete_pages_document(file_path: &str, pages_to_delete: &[u32]) -> Result<Doc
     Ok(doc)
 }
 
-fn extract_pages_document(
-    file_path: &str,
-    pages_to_extract: &[u32],
-) -> Result<Document, PdfError> {
+fn extract_pages_document(file_path: &str, pages_to_extract: &[u32]) -> Result<Document, PdfError> {
     let mut doc = Document::load(file_path)?;
     let all_pages = sorted_page_numbers(&doc);
-
-    let page_count = all_pages.len() as u32;
-    let actual_pages_to_extract: Vec<u32> = pages_to_extract
-        .iter()
-        .filter(|&&idx| idx >= 1 && idx <= page_count)
-        .map(|&idx| all_pages[(idx - 1) as usize])
-        .collect();
-
-    if actual_pages_to_extract.is_empty() {
-        return Err(PdfError::InvalidOperation(
-            "No valid pages to extract: the output PDF would have no pages".to_string(),
-        ));
-    }
+    let actual_pages_to_extract = validated_page_numbers(&doc, pages_to_extract)?;
 
     let pages_to_delete: Vec<u32> = all_pages
         .iter()
@@ -707,7 +712,6 @@ pub async fn delete_pages(
         new_doc.save(&output_path)?;
 
         Ok(ProcessResult {
-            success: true,
             message: format!("Successfully deleted {} pages", pages_to_delete.len()),
             output_path: Some(output_path),
         })
@@ -727,7 +731,6 @@ pub async fn extract_pages(
         new_doc.save(&output_path)?;
 
         Ok(ProcessResult {
-            success: true,
             message: format!("Successfully extracted {} pages", pages_to_extract.len()),
             output_path: Some(output_path),
         })
@@ -752,7 +755,6 @@ pub async fn compress_pdf(
         let new_size = fs::metadata(&output_path)?.len();
 
         Ok(ProcessResult {
-            success: true,
             message: format_size_change_message(original_size, new_size),
             output_path: Some(output_path),
         })
@@ -775,7 +777,7 @@ fn find_pdftoppm() -> Option<PathBuf> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        return resolve_brew_pdftoppm();
+        resolve_brew_pdftoppm()
     }
 
     #[cfg(target_os = "windows")]
@@ -919,7 +921,6 @@ pub async fn pdf_to_images(
         let file_count = count_generated_image_files(Path::new(&output_dir), &run_prefix, ext)?;
 
         Ok(ProcessResult {
-            success: true,
             message: format!(
                 "成功转换为 {} 张 {} 图片（{}DPI）",
                 file_count,
@@ -934,8 +935,8 @@ pub async fn pdf_to_images(
 
 fn images_to_pdf_document(image_paths: &[String]) -> Result<Document, PdfError> {
     use image::{ColorType, GenericImageView, ImageFormat, ImageReader};
-    use lopdf::Stream;
     use lopdf::dictionary;
+    use lopdf::Stream;
 
     let mut doc = Document::with_version("1.5");
     let mut pages_kids = Vec::new();
@@ -976,9 +977,7 @@ fn images_to_pdf_document(image_paths: &[String]) -> Result<Document, PdfError> 
                     let [r, g, b, a] = pixel.0;
                     let alpha = a as u32;
                     for channel in [r, g, b] {
-                        data.push(
-                            ((channel as u32 * alpha + 255 * (255 - alpha)) / 255) as u8,
-                        );
+                        data.push(((channel as u32 * alpha + 255 * (255 - alpha)) / 255) as u8);
                     }
                 }
                 data
@@ -1056,12 +1055,42 @@ pub async fn images_to_pdf(
         doc.save(&output_path)?;
 
         Ok(ProcessResult {
-            success: true,
             message: format!("Successfully created PDF from {} images", image_paths.len()),
             output_path: Some(output_path),
         })
     })
     .await
+}
+
+fn rotate_pages_document(
+    file_path: &str,
+    pages: &[u32],
+    rotation: i64,
+) -> Result<Document, PdfError> {
+    if !matches!(rotation, 90 | 180 | 270) {
+        return Err(PdfError::InvalidOperation(
+            "Rotation must be 90, 180, or 270 degrees".to_string(),
+        ));
+    }
+
+    let mut doc = Document::load(file_path)?;
+    let actual_pages = validated_page_numbers(&doc, pages)?;
+    let page_ids = doc.get_pages();
+
+    for actual_page_number in actual_pages {
+        let page_id = page_ids.get(&actual_page_number).copied().ok_or_else(|| {
+            PdfError::InvalidOperation("Requested page not found in PDF".to_string())
+        })?;
+        let page_dictionary = doc.get_object_mut(page_id)?.as_dict_mut()?;
+        let current_rotation = page_dictionary
+            .get(b"Rotate")
+            .ok()
+            .and_then(|value| value.as_i64().ok())
+            .unwrap_or(0);
+        page_dictionary.set("Rotate", (current_rotation + rotation).rem_euclid(360));
+    }
+
+    Ok(doc)
 }
 
 /// Rotate pages in PDF
@@ -1073,34 +1102,10 @@ pub async fn rotate_pages(
     output_path: String,
 ) -> Result<ProcessResult, PdfError> {
     run_blocking(move || {
-        let mut doc = Document::load(&file_path)?;
-        let mut all_pages: Vec<u32> = doc.get_pages().keys().cloned().collect();
-        all_pages.sort();
-
-        let page_ids = doc.get_pages();
-        let page_count = all_pages.len() as u32;
-
-        for page_idx in &pages {
-            if *page_idx >= 1 && *page_idx <= page_count {
-                let actual_page_num = all_pages[(*page_idx - 1) as usize];
-                if let Some(&page_id) = page_ids.get(&actual_page_num) {
-                    if let Ok(Object::Dictionary(ref mut page_dict)) = doc.get_object_mut(page_id) {
-                        let current_rotation = page_dict
-                            .get(b"Rotate")
-                            .ok()
-                            .and_then(|r| r.as_i64().ok())
-                            .unwrap_or(0);
-                        let new_rotation = (current_rotation + rotation) % 360;
-                        page_dict.set("Rotate", new_rotation);
-                    }
-                }
-            }
-        }
-
+        let mut doc = rotate_pages_document(&file_path, &pages, rotation)?;
         doc.save(&output_path)?;
 
         Ok(ProcessResult {
-            success: true,
             message: format!(
                 "Successfully rotated {} pages by {}°",
                 pages.len(),
@@ -1125,7 +1130,6 @@ pub async fn reorder_pages(
         reordered_doc.save(&output_path)?;
 
         Ok(ProcessResult {
-            success: true,
             message: format!("Successfully reordered {} pages", total_pages),
             output_path: Some(output_path),
         })
@@ -1163,15 +1167,69 @@ mod tests {
         }
     }
 
-    #[test]
-    fn merge_preserves_page_sizes_from_source_documents() -> Result<(), PdfError> {
-        let input_paths = vec![
-            "../test/plot_01_embedding.pdf".to_string(),
-            "../test/plot_03_pseudotime_dist.pdf".to_string(),
-            "../test/plot_05_fate_probs.pdf".to_string(),
+    fn create_test_pdf(path: &Path, width: i64, height: i64, title: &str) -> Result<(), PdfError> {
+        use lopdf::{dictionary, Stream};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let page_id = doc.new_object_id();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, Vec::new()));
+
+        doc.objects.insert(
+            page_id,
+            dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => vec![0.into(), 0.into(), width.into(), height.into()],
+                "Contents" => content_id,
+            }
+            .into(),
+        );
+        doc.objects.insert(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }
+            .into(),
+        );
+
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        let info_id = doc.add_object(dictionary! {
+            "Title" => Object::string_literal(title),
+            "Author" => Object::string_literal("PDF Toolkit Tests"),
+        });
+        doc.trailer.set("Root", catalog_id);
+        doc.trailer.set("Info", info_id);
+        doc.save(path)?;
+        Ok(())
+    }
+
+    fn create_fixture_pdfs(directory: &Path) -> Result<Vec<String>, PdfError> {
+        let fixtures = [
+            ("portrait.pdf", 612, 792, "Portrait"),
+            ("landscape.pdf", 640, 480, "Landscape"),
+            ("tall.pdf", 300, 900, "Tall"),
         ];
 
+        fixtures
+            .iter()
+            .map(|(name, width, height, title)| {
+                let path = directory.join(name);
+                create_test_pdf(&path, *width, *height, title)?;
+                Ok(path.to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn merge_preserves_page_sizes_from_source_documents() -> Result<(), PdfError> {
         let temp_dir = tempdir()?;
+        let input_paths = create_fixture_pdfs(temp_dir.path())?;
         let output_path = temp_dir.path().join("merged.pdf");
 
         let mut merged_doc = merge_pdf_documents(&input_paths)?;
@@ -1181,7 +1239,7 @@ mod tests {
         let merged_pages = merged_doc.get_pages();
         assert_eq!(merged_pages.len(), input_paths.len());
 
-        for (source_path, (_, merged_page_id)) in input_paths.iter().zip(merged_pages.into_iter()) {
+        for (source_path, (_, merged_page_id)) in input_paths.iter().zip(merged_pages) {
             let source_doc = Document::load(source_path)?;
             let (_, source_page_id) =
                 source_doc.get_pages().into_iter().next().ok_or_else(|| {
@@ -1199,19 +1257,10 @@ mod tests {
 
     #[test]
     fn reorder_preserves_requested_page_sequence() -> Result<(), PdfError> {
-        let source_paths = vec![
-            "../test/plot_01_embedding.pdf".to_string(),
-            "../test/plot_03_pseudotime_dist.pdf".to_string(),
-            "../test/plot_05_fate_probs.pdf".to_string(),
-        ];
         let requested_order = vec![3, 1, 2];
-        let expected_source_paths = [
-            "../test/plot_05_fate_probs.pdf",
-            "../test/plot_01_embedding.pdf",
-            "../test/plot_03_pseudotime_dist.pdf",
-        ];
-
         let temp_dir = tempdir()?;
+        let source_paths = create_fixture_pdfs(temp_dir.path())?;
+        let expected_source_paths = [&source_paths[2], &source_paths[0], &source_paths[1]];
         let merged_input_path = temp_dir.path().join("merged-input.pdf");
         let output_path = temp_dir.path().join("reordered.pdf");
 
@@ -1228,9 +1277,8 @@ mod tests {
         let reordered_pages = reordered_doc.get_pages();
         assert_eq!(reordered_pages.len(), requested_order.len());
 
-        for (source_path, (_, reordered_page_id)) in expected_source_paths
-            .iter()
-            .zip(reordered_pages.into_iter())
+        for (source_path, (_, reordered_page_id)) in
+            expected_source_paths.iter().zip(reordered_pages)
         {
             let source_doc = Document::load(source_path)?;
             let (_, source_page_id) =
@@ -1304,44 +1352,88 @@ mod tests {
     }
 
     #[test]
-    fn delete_all_pages_is_rejected() {
-        let error = delete_pages_document("../test/plot_01_embedding.pdf", &[1])
+    fn delete_all_pages_is_rejected() -> Result<(), PdfError> {
+        let temp_dir = tempdir()?;
+        let source_paths = create_fixture_pdfs(temp_dir.path())?;
+        let error = delete_pages_document(&source_paths[0], &[1])
             .expect_err("deleting every page should fail");
 
         assert!(
             error.to_string().contains("Cannot delete all pages"),
             "unexpected error: {error}"
         );
+        Ok(())
     }
 
     #[test]
-    fn extract_with_no_valid_pages_is_rejected() {
-        let error = extract_pages_document("../test/plot_01_embedding.pdf", &[99])
-            .expect_err("extracting only out-of-range pages should fail");
+    fn page_operations_reject_invalid_and_duplicate_page_numbers() -> Result<(), PdfError> {
+        let temp_dir = tempdir()?;
+        let source_paths = create_fixture_pdfs(temp_dir.path())?;
+        let source_path = &source_paths[0];
+
+        let invalid_extract = extract_pages_document(source_path, &[99])
+            .expect_err("extracting an out-of-range page should fail");
+        let duplicate_extract = extract_pages_document(source_path, &[1, 1])
+            .expect_err("extracting a duplicate page should fail");
+        let partially_invalid_delete = delete_pages_document(source_path, &[1, 99])
+            .expect_err("a partially invalid delete request should fail");
+        let invalid_rotation_page = rotate_pages_document(source_path, &[99], 90)
+            .expect_err("rotating an out-of-range page should fail");
+        let invalid_rotation = rotate_pages_document(source_path, &[1], 45)
+            .expect_err("unsupported rotation should fail");
 
         assert!(
-            error.to_string().contains("No valid pages to extract"),
-            "unexpected error: {error}"
+            invalid_extract
+                .to_string()
+                .contains("outside the valid range"),
+            "unexpected error: {invalid_extract}"
         );
+        assert!(
+            duplicate_extract.to_string().contains("more than once"),
+            "unexpected error: {duplicate_extract}"
+        );
+        assert!(
+            partially_invalid_delete
+                .to_string()
+                .contains("outside the valid range"),
+            "unexpected error: {partially_invalid_delete}"
+        );
+        assert!(
+            invalid_rotation_page
+                .to_string()
+                .contains("outside the valid range"),
+            "unexpected error: {invalid_rotation_page}"
+        );
+        assert!(
+            invalid_rotation.to_string().contains("90, 180, or 270"),
+            "unexpected error: {invalid_rotation}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pdf_info_reads_title_and_author_metadata() -> Result<(), PdfError> {
+        let temp_dir = tempdir()?;
+        let source_paths = create_fixture_pdfs(temp_dir.path())?;
+        let info = load_pdf_info(&source_paths[0])?;
+
+        assert_eq!(info.page_count, 1);
+        assert_eq!(info.title.as_deref(), Some("Portrait"));
+        assert_eq!(info.author.as_deref(), Some("PDF Toolkit Tests"));
+        Ok(())
     }
 
     #[test]
     fn delete_pages_prunes_orphaned_objects() -> Result<(), PdfError> {
-        let source_paths = vec![
-            "../test/plot_01_embedding.pdf".to_string(),
-            "../test/plot_03_pseudotime_dist.pdf".to_string(),
-            "../test/plot_05_fate_probs.pdf".to_string(),
-        ];
-
         let temp_dir = tempdir()?;
+        let source_paths = create_fixture_pdfs(temp_dir.path())?;
         let input_path = temp_dir.path().join("input.pdf");
         let output_path = temp_dir.path().join("output.pdf");
 
         let mut merged_doc = merge_pdf_documents(&source_paths)?;
         merged_doc.save(&input_path)?;
 
-        let mut new_doc =
-            delete_pages_document(input_path.to_string_lossy().as_ref(), &[2, 3])?;
+        let mut new_doc = delete_pages_document(input_path.to_string_lossy().as_ref(), &[2, 3])?;
         new_doc.save(&output_path)?;
 
         let saved_doc = Document::load(&output_path)?;
@@ -1350,7 +1442,7 @@ mod tests {
         // Only page 1 (from plot_01) is kept, so the output should not be much
         // larger than that page's source document; without pruning it would
         // stay close to the full merged input size.
-        let retained_source_size = fs::metadata("../test/plot_01_embedding.pdf")?.len();
+        let retained_source_size = fs::metadata(&source_paths[0])?.len();
         let output_size = fs::metadata(&output_path)?.len();
         assert!(
             output_size <= retained_source_size * 11 / 10,
@@ -1389,7 +1481,13 @@ mod tests {
             let Object::Stream(stream) = object else {
                 continue;
             };
-            if stream.dict.get(b"Subtype").and_then(Object::as_name_str).ok() != Some("Image") {
+            if stream
+                .dict
+                .get(b"Subtype")
+                .and_then(Object::as_name_str)
+                .ok()
+                != Some("Image")
+            {
                 continue;
             }
 
@@ -1420,25 +1518,21 @@ mod tests {
         }
 
         assert!(found_jpeg, "output should contain a DCTDecode image stream");
-        assert!(found_flate, "output should contain a FlateDecode image stream");
+        assert!(
+            found_flate,
+            "output should contain a FlateDecode image stream"
+        );
 
         Ok(())
     }
 
     #[test]
-    fn reorder_rejects_duplicate_page_numbers() {
-        let source_paths = vec![
-            "../test/plot_01_embedding.pdf".to_string(),
-            "../test/plot_03_pseudotime_dist.pdf".to_string(),
-            "../test/plot_05_fate_probs.pdf".to_string(),
-        ];
-        let temp_dir = tempdir().expect("temp dir should be created");
+    fn reorder_rejects_duplicate_page_numbers() -> Result<(), PdfError> {
+        let temp_dir = tempdir()?;
+        let source_paths = create_fixture_pdfs(temp_dir.path())?;
         let merged_input_path = temp_dir.path().join("merged-input.pdf");
-        let mut merged_doc =
-            merge_pdf_documents(&source_paths).expect("merge fixture should be created");
-        merged_doc
-            .save(&merged_input_path)
-            .expect("merged fixture should be saved");
+        let mut merged_doc = merge_pdf_documents(&source_paths)?;
+        merged_doc.save(&merged_input_path)?;
 
         let error =
             reordered_pdf_document(merged_input_path.to_string_lossy().as_ref(), &[1, 1, 2])
@@ -1450,5 +1544,6 @@ mod tests {
                 .contains("permutation of every page number exactly once"),
             "unexpected error: {error}"
         );
+        Ok(())
     }
 }
