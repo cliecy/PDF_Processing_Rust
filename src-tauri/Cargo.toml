@@ -1,6 +1,6 @@
 [package]
 name = "pdf-toolkit"
-version = "1.0.1"
+version = "1.2.0"
 description = "A powerful PDF processing toolkit"
 authors = ["PDF Toolkit"]
 edition = "2021"
