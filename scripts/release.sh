@@ -113,7 +113,7 @@ fi
 echo "==> 推送 release（触发 GitHub Actions）"
 git_remote push release
 
-if command -v gh >/dev/null; then
+if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
     sleep 5
     echo "==> 最新的 workflow 运行："
     gh run list --limit 1
