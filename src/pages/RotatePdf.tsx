@@ -57,11 +57,11 @@ export default function RotatePdf() {
   const handleRotate = async () => {
     if (!filePath || selectedPages.size === 0) return;
 
+    setLoading(true);
     try {
       const outputPath = await selectOutputFile('rotated.pdf');
       if (!outputPath) return;
 
-      setLoading(true);
       const res = await rotatePages(
         filePath,
         Array.from(selectedPages),

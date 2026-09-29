@@ -58,11 +58,11 @@ export default function ExtractPages() {
   const handleExtract = async () => {
     if (!filePath || selectedPages.size === 0) return;
 
+    setLoading(true);
     try {
       const outputPath = await selectOutputFile('extracted.pdf');
       if (!outputPath) return;
 
-      setLoading(true);
       const res = await extractPages(
         filePath,
         Array.from(selectedPages).sort((a, b) => a - b),

@@ -50,11 +50,11 @@ export default function DeletePages() {
   const handleDelete = async () => {
     if (!filePath || selectedPages.size === 0 || allPagesSelected) return;
 
+    setLoading(true);
     try {
       const outputPath = await selectOutputFile('output.pdf');
       if (!outputPath) return;
 
-      setLoading(true);
       const res = await deletePages(
         filePath,
         Array.from(selectedPages),

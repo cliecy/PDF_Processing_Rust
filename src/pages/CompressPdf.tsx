@@ -43,11 +43,11 @@ export default function CompressPdf() {
   const handleCompress = async () => {
     if (!filePath) return;
 
+    setLoading(true);
     try {
       const outputPath = await selectOutputFile('compressed.pdf');
       if (!outputPath) return;
 
-      setLoading(true);
       const res = await compressPdf(filePath, outputPath, quality);
       setResult(res);
     } catch (error) {
@@ -156,7 +156,7 @@ export default function CompressPdf() {
               </div>
               <div className="text-center">
                 <span className="inline-block px-4 py-2 bg-green-500/10 rounded-lg text-green-400 font-medium">
-                  {OPTIMIZATION_LEVELS[selectedLevelIndex].label} ({quality}%)
+                  {OPTIMIZATION_LEVELS[selectedLevelIndex].label}
                 </span>
               </div>
             </div>

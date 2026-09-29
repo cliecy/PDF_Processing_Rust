@@ -76,6 +76,15 @@ fn load_pdf_document(path: impl AsRef<Path>) -> Result<Document, PdfError> {
     Document::load(path).map_err(|error| pdf_path_error("读取 PDF", path, error))
 }
 
+fn ensure_not_encrypted(doc: &Document) -> Result<(), PdfError> {
+    if doc.trailer.get(b"Encrypt").is_ok() {
+        return Err(PdfError::InvalidOperation(
+            "The PDF is encrypted and cannot be processed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn pdf_metadata_string(doc: &Document, key: &[u8]) -> Option<String> {
     doc.trailer
         .get(b"Info")
@@ -247,6 +256,7 @@ fn merge_pdf_documents(file_paths: &[String]) -> Result<Document, PdfError> {
 
     for path in file_paths {
         let mut doc = load_pdf_document(path)?;
+        ensure_not_encrypted(&doc)?;
         doc.renumber_objects_with(max_id);
         max_id = doc.max_id + 1;
 
@@ -359,6 +369,7 @@ fn build_document_from_parts(
 
 fn reordered_pdf_document(file_path: &str, new_order: &[u32]) -> Result<Document, PdfError> {
     let mut doc = load_pdf_document(file_path)?;
+    ensure_not_encrypted(&doc)?;
     doc.renumber_objects();
 
     let page_map = doc.get_pages();
@@ -679,6 +690,7 @@ pub async fn split_pdf(
         }
 
         let doc = load_pdf_document(&file_path)?;
+        ensure_not_encrypted(&doc)?;
         let total_pages = doc.get_pages().len();
         let base_name = Path::new(&file_path)
             .file_stem()
@@ -774,6 +786,7 @@ fn validated_page_numbers(doc: &Document, requested_pages: &[u32]) -> Result<Vec
 
 fn delete_pages_document(file_path: &str, pages_to_delete: &[u32]) -> Result<Document, PdfError> {
     let mut doc = load_pdf_document(file_path)?;
+    ensure_not_encrypted(&doc)?;
     let all_pages = sorted_page_numbers(&doc);
     let actual_pages_to_delete = validated_page_numbers(&doc, pages_to_delete)?;
 
@@ -790,6 +803,7 @@ fn delete_pages_document(file_path: &str, pages_to_delete: &[u32]) -> Result<Doc
 
 fn extract_pages_document(file_path: &str, pages_to_extract: &[u32]) -> Result<Document, PdfError> {
     let mut doc = load_pdf_document(file_path)?;
+    ensure_not_encrypted(&doc)?;
     let all_pages = sorted_page_numbers(&doc);
     let actual_pages_to_extract = validated_page_numbers(&doc, pages_to_extract)?;
 
@@ -851,6 +865,7 @@ pub async fn compress_pdf(
 ) -> Result<ProcessResult, PdfError> {
     run_blocking(move || {
         let mut doc = load_pdf_document(&file_path)?;
+        ensure_not_encrypted(&doc)?;
         apply_compression_profile(&mut doc, quality);
 
         save_pdf_document(&mut doc, &output_path)?;
@@ -960,6 +975,27 @@ fn external_tool_command(program: &Path) -> Command {
     command
 }
 
+fn validate_pdf_to_images_dpi(dpi: u32) -> Result<u32, PdfError> {
+    if (9..=2400).contains(&dpi) {
+        Ok(dpi)
+    } else {
+        Err(PdfError::InvalidOperation(
+            "DPI must be between 9 and 2400".to_string(),
+        ))
+    }
+}
+
+fn validate_pdf_to_images_format(format: &str) -> Result<&'static str, PdfError> {
+    match format.trim().to_lowercase().as_str() {
+        "png" => Ok("png"),
+        "jpg" | "jpeg" => Ok("jpeg"),
+        other => Err(PdfError::InvalidOperation(format!(
+            "Unsupported image format: '{}'. Supported formats: PNG, JPG",
+            other
+        ))),
+    }
+}
+
 /// Convert PDF pages to images
 #[tauri::command]
 pub async fn pdf_to_images(
@@ -977,18 +1013,10 @@ pub async fn pdf_to_images(
             )
         })?;
 
-        let dpi_value = dpi.unwrap_or(150);
-        let format_flag = if format.to_lowercase() == "jpg" || format.to_lowercase() == "jpeg" {
-            "-jpeg"
-        } else {
-            "-png"
-        };
-
-        let ext = if format.to_lowercase() == "jpg" || format.to_lowercase() == "jpeg" {
-            "jpg"
-        } else {
-            "png"
-        };
+        let dpi_value = validate_pdf_to_images_dpi(dpi.unwrap_or(150))?;
+        let image_format = validate_pdf_to_images_format(&format)?;
+        let format_flag = if image_format == "jpeg" { "-jpeg" } else { "-png" };
+        let ext = if image_format == "jpeg" { "jpg" } else { "png" };
 
         let base_name = Path::new(&file_path)
             .file_stem()
@@ -1042,6 +1070,11 @@ pub async fn pdf_to_images(
 }
 
 fn images_to_pdf_document(image_paths: &[String]) -> Result<Document, PdfError> {
+    if image_paths.is_empty() {
+        return Err(PdfError::InvalidOperation(
+            "At least one image is required".to_string(),
+        ));
+    }
     use image::{ColorType, GenericImageView, ImageFormat, ImageReader};
     use lopdf::dictionary;
     use lopdf::Stream;
@@ -1182,6 +1215,7 @@ fn rotate_pages_document(
     }
 
     let mut doc = load_pdf_document(file_path)?;
+    ensure_not_encrypted(&doc)?;
     let actual_pages = validated_page_numbers(&doc, pages)?;
     let page_ids = doc.get_pages();
 
@@ -1651,5 +1685,75 @@ mod tests {
             "unexpected error: {error}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn ensure_not_encrypted_rejects_encrypted_documents() -> Result<(), PdfError> {
+        let plain = Document::with_version("1.5");
+        assert!(ensure_not_encrypted(&plain).is_ok());
+
+        let mut encrypted = Document::with_version("1.5");
+        encrypted.trailer.set("Encrypt", Object::Dictionary(dictionary! {}));
+        assert!(ensure_not_encrypted(&encrypted).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn mutating_operations_reject_encrypted_input() -> Result<(), PdfError> {
+        let temp_dir = tempdir()?;
+        let path = temp_dir.path().join("encrypted.pdf");
+        create_test_pdf(&path, 612, 792, "Encrypted")?;
+
+        let mut doc = load_pdf_document(&path)?;
+        let encrypt_id = doc.new_object_id();
+        doc.objects.insert(
+            encrypt_id,
+            dictionary! { "Filter" => "Standard" }.into(),
+        );
+        doc.trailer.set("Encrypt", encrypt_id);
+        save_pdf_document(&mut doc, &path)?;
+
+        let source = path.to_string_lossy().into_owned();
+
+        let merge_error = merge_pdf_documents(&[source.clone()])
+            .expect_err("merging an encrypted PDF must fail");
+        assert!(
+            merge_error.to_string().contains("encrypted"),
+            "unexpected error: {merge_error}"
+        );
+
+        let delete_error = delete_pages_document(&source, &[1])
+            .expect_err("deleting pages from an encrypted PDF must fail");
+        assert!(
+            delete_error.to_string().contains("encrypted"),
+            "unexpected error: {delete_error}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn images_to_pdf_rejects_empty_input() {
+        let error = images_to_pdf_document(&[]).expect_err("empty image list must fail");
+        assert!(
+            error.to_string().contains("At least one image is required"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn pdf_to_images_input_validation() {
+        assert_eq!(validate_pdf_to_images_dpi(9).unwrap(), 9);
+        assert_eq!(validate_pdf_to_images_dpi(150).unwrap(), 150);
+        assert_eq!(validate_pdf_to_images_dpi(2400).unwrap(), 2400);
+        assert!(validate_pdf_to_images_dpi(8).is_err());
+        assert!(validate_pdf_to_images_dpi(2401).is_err());
+
+        assert_eq!(validate_pdf_to_images_format("png").unwrap(), "png");
+        assert_eq!(validate_pdf_to_images_format("PNG").unwrap(), "png");
+        assert_eq!(validate_pdf_to_images_format("jpg").unwrap(), "jpeg");
+        assert_eq!(validate_pdf_to_images_format("JPEG").unwrap(), "jpeg");
+        assert!(validate_pdf_to_images_format("tiff").is_err());
+        assert!(validate_pdf_to_images_format("").is_err());
     }
 }

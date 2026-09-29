@@ -57,11 +57,11 @@ export default function ReorderPages() {
   const handleReorder = async () => {
     if (!filePath || pageOrder.length === 0) return;
 
+    setLoading(true);
     try {
       const outputPath = await selectOutputFile('reordered.pdf');
       if (!outputPath) return;
 
-      setLoading(true);
       setResult(await reorderPages(filePath, pageOrder, outputPath));
     } catch (error) {
       setResult({ success: false, message: String(error), output_path: null });

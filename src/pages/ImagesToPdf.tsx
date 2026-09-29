@@ -24,11 +24,15 @@ export default function ImagesToPdf() {
     try {
       const paths = await selectImageFiles();
       if (paths) {
-        const newImages = paths.map((path) => ({
-          path,
-          name: path.split(/[/\\]/).pop() || path,
-        }));
-        setImages([...images, ...newImages]);
+        const newImages = paths
+          .filter((path) => !images.some((existing) => existing.path === path))
+          .map((path) => ({
+            path,
+            name: path.split(/[/\\]/).pop() || path,
+          }));
+        if (newImages.length > 0) {
+          setImages([...images, ...newImages]);
+        }
       }
     } catch (error) {
       console.error('Error selecting images:', error);
@@ -42,11 +46,11 @@ export default function ImagesToPdf() {
   const handleConvert = async () => {
     if (images.length === 0) return;
 
+    setLoading(true);
     try {
       const outputPath = await selectOutputFile('output.pdf');
       if (!outputPath) return;
 
-      setLoading(true);
       const res = await imagesToPdf(
         images.map((img) => img.path),
         outputPath

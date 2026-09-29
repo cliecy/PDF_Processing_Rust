@@ -24,11 +24,15 @@ export default function MergePdf() {
     try {
       const paths = await selectPdfFiles(true);
       if (paths) {
-        const newFiles = paths.map((path) => ({
-          path,
-          name: path.split(/[/\\]/).pop() || path,
-        }));
-        setFiles([...files, ...newFiles]);
+        const newFiles = paths
+          .filter((path) => !files.some((existing) => existing.path === path))
+          .map((path) => ({
+            path,
+            name: path.split(/[/\\]/).pop() || path,
+          }));
+        if (newFiles.length > 0) {
+          setFiles([...files, ...newFiles]);
+        }
       }
     } catch (error) {
       console.error('Error selecting files:', error);
@@ -42,11 +46,11 @@ export default function MergePdf() {
   const handleMerge = async () => {
     if (files.length < 2) return;
 
+    setLoading(true);
     try {
       const outputPath = await selectOutputFile('merged.pdf');
       if (!outputPath) return;
 
-      setLoading(true);
       const res = await mergePdfs(
         files.map((f) => f.path),
         outputPath

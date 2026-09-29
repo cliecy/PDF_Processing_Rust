@@ -43,11 +43,11 @@ export default function PdfToImages() {
   const handleConvert = async () => {
     if (!filePath) return;
 
+    setLoading(true);
     try {
       const outputDir = await selectOutputDir();
       if (!outputDir) return;
 
-      setLoading(true);
       const res = await pdfToImages(filePath, outputDir, format, dpi);
       setResult(res);
     } catch (error) {

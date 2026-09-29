@@ -92,11 +92,11 @@ export default function SplitPdf() {
   const handleSplit = async () => {
     if (!filePath) return;
 
+    setLoading(true);
     try {
       const outputDir = await selectOutputDir();
       if (!outputDir) return;
 
-      setLoading(true);
       const res = await splitPdf(
         filePath,
         ranges.map((r) => [r.start, r.end] as [number, number]),
@@ -122,7 +122,9 @@ export default function SplitPdf() {
     setResult(null);
   };
 
-  const hasInvalidRanges = ranges.some((range) => range.start > range.end);
+  const hasOverlappingRanges = ranges.some((a, i) =>
+    ranges.some((b, j) => j > i && a.start <= b.end && b.start <= a.end)
+  );
 
   if (result) {
     return (
@@ -269,12 +271,17 @@ export default function SplitPdf() {
             })}
           </div>
 
+          {hasOverlappingRanges && (
+            <p className="text-xs text-amber-400 mb-2">
+              页面范围存在重叠，重叠页会同时写入多个输出文件
+            </p>
+          )}
           {/* Action */}
           <Button
             variant="primary"
             onClick={handleSplit}
             loading={loading}
-            disabled={hasInvalidRanges}
+            disabled={hasOverlappingRanges}
             icon={<Scissors size={18} />}
           >
             分割 PDF
